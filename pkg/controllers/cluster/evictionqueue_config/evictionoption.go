@@ -20,8 +20,8 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// GracefulEvictionOptions holds the options that control the behavior of the graceful eviction queue based on the overall health of the clusters.
-type GracefulEvictionOptions struct {
+// EvictionQueueOptions holds the options that control the behavior of the graceful eviction queue based on the overall health of the clusters.
+type EvictionQueueOptions struct {
 	// ResourceEvictionRate is the number of resources to be evicted per second.
 	// This is the default rate when the system is considered healthy.
 	ResourceEvictionRate float32
@@ -39,8 +39,8 @@ type GracefulEvictionOptions struct {
 	LargeClusterNumThreshold int
 }
 
-// AddFlags adds flags for the GracefulEvictionOptions to the specified FlagSet.
-func (o *GracefulEvictionOptions) AddFlags(fs *pflag.FlagSet) {
+// AddFlags adds flags for the EvictionQueueOptions to the specified FlagSet.
+func (o *EvictionQueueOptions) AddFlags(fs *pflag.FlagSet) {
 	if o == nil {
 		return
 	}
