@@ -14,23 +14,28 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package gracefuleviction
+package cluster
 
 import (
 	"time"
 
-	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
-	"github.com/karmada-io/karmada/pkg/controllers/gracefuleviction/config"
-	"github.com/karmada-io/karmada/pkg/sharedcli/ratelimiterflag"
-	"github.com/karmada-io/karmada/pkg/util"
-	"github.com/karmada-io/karmada/pkg/util/fedinformer/genericmanager"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+
+	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
+	config "github.com/karmada-io/karmada/pkg/controllers/cluster/evictionqueue_config"
+	"github.com/karmada-io/karmada/pkg/metrics"
+	"github.com/karmada-io/karmada/pkg/sharedcli/ratelimiterflag"
+	"github.com/karmada-io/karmada/pkg/util"
+	"github.com/karmada-io/karmada/pkg/util/fedinformer/genericmanager"
 )
 
-// DynamicRateLimiter implements a rate limiter that dynamically adjusts its rate
-// based on the overall health of the clusters managed by Karmada.
+// maxEvictionDelay is the maximum delay for eviction when the rate is 0
+const maxEvictionDelay = 1000 * time.Second
+
+// DynamicRateLimiter adjusts its rate based on the overall health of clusters.
+// It implements the workqueue.RateLimiter interface with dynamic behavior.
 type DynamicRateLimiter[T comparable] struct {
 	resourceEvictionRate          float32
 	secondaryResourceEvictionRate float32
@@ -40,7 +45,7 @@ type DynamicRateLimiter[T comparable] struct {
 }
 
 // NewDynamicRateLimiter creates a new DynamicRateLimiter with the given options.
-func NewDynamicRateLimiter[T comparable](informerManager genericmanager.SingleClusterInformerManager, opts config.GracefulEvictionOptions) workqueue.TypedRateLimiter[T] {
+func NewDynamicRateLimiter[T comparable](informerManager genericmanager.SingleClusterInformerManager, opts config.EvictionQueueOptions) workqueue.TypedRateLimiter[T] {
 	return &DynamicRateLimiter[T]{
 		resourceEvictionRate:          opts.ResourceEvictionRate,
 		secondaryResourceEvictionRate: opts.SecondaryResourceEvictionRate,
@@ -51,28 +56,32 @@ func NewDynamicRateLimiter[T comparable](informerManager genericmanager.SingleCl
 }
 
 // When determines how long to wait before processing an item.
+// Returns a longer delay when the system is unhealthy.
 func (d *DynamicRateLimiter[T]) When(item T) time.Duration {
 	currentRate := d.getCurrentRate()
 	if currentRate == 0 {
-		return 1000 * time.Second
+		return maxEvictionDelay
 	}
 	return time.Duration(1 / currentRate * float32(time.Second))
 }
 
-// getCurrentRate returns the current rate based on cluster health status
+// getCurrentRate calculates the appropriate rate based on cluster health:
+// - Normal rate when system is healthy
+// - Secondary rate when system is unhealthy but large-scale
+// - Zero (halt evictions) when system is unhealthy and small-scale
 func (d *DynamicRateLimiter[T]) getCurrentRate() float32 {
 	clusterGVR := clusterv1alpha1.SchemeGroupVersion.WithResource("clusters")
 
 	var lister = d.informerManager.Lister(clusterGVR)
 	if lister == nil {
-		klog.Errorf("Failed to get cluster lister, falling back to secondary rate")
-		return d.secondaryResourceEvictionRate
+		klog.Errorf("Failed to get cluster lister, halting eviction for safety")
+		return 0
 	}
 
 	clusters, err := lister.List(labels.Everything())
 	if err != nil {
-		klog.Errorf("Failed to list clusters from informer cache: %v, falling back to secondary rate", err)
-		return d.secondaryResourceEvictionRate
+		klog.Errorf("Failed to list clusters from informer cache: %v, halting eviction for safety", err)
+		return 0
 	}
 
 	totalClusters := len(clusters)
@@ -91,7 +100,11 @@ func (d *DynamicRateLimiter[T]) getCurrentRate() float32 {
 		}
 	}
 
+	// Update metrics
 	failureRate := float32(unhealthyClusters) / float32(totalClusters)
+	metrics.RecordClusterHealthMetrics(unhealthyClusters, float64(failureRate))
+
+	// Determine rate based on health status
 	isUnhealthy := failureRate > d.unhealthyClusterThreshold
 	if !isUnhealthy {
 		return d.resourceEvictionRate
@@ -108,21 +121,22 @@ func (d *DynamicRateLimiter[T]) getCurrentRate() float32 {
 	return 0
 }
 
-// Forget is called when an item is successfully processed.
+// Forget is a no-op as this rate limiter doesn't track individual items.
 func (d *DynamicRateLimiter[T]) Forget(item T) {
 	// No-op
 }
 
-// NumRequeues returns the number of times an item has been requeued.
+// NumRequeues always returns 0 as this rate limiter doesn't track retries.
 func (d *DynamicRateLimiter[T]) NumRequeues(item T) int {
 	return 0
 }
 
-// NewGracefulEvictionRateLimiter creates a rate limiter for graceful eviction controllers
-// It combines the dynamic rate limiter with the default controller rate limiter
+// NewGracefulEvictionRateLimiter creates a combined rate limiter for eviction.
+// It uses the maximum delay from both dynamic and default rate limiters to ensure
+// both cluster health and retry backoff are considered.
 func NewGracefulEvictionRateLimiter[T comparable](
 	informerManager genericmanager.SingleClusterInformerManager,
-	evictionOpts config.GracefulEvictionOptions,
+	evictionOpts config.EvictionQueueOptions,
 	rateLimiterOpts ratelimiterflag.Options) workqueue.TypedRateLimiter[T] {
 
 	dynamicLimiter := NewDynamicRateLimiter[T](informerManager, evictionOpts)

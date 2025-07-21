@@ -6,7 +6,7 @@ import (
 )
 
 func TestEvictionControllerOptions_AddFlags(t *testing.T) {
-	config := &GracefulEvictionOptions{}
+	config := &evictionqueue_config.EvictionQueueOptions{}
 	fs := pflag.NewFlagSet("test", pflag.ExitOnError)
 	config.AddFlags(fs)
 
@@ -25,7 +25,7 @@ func TestEvictionControllerOptions_AddFlags(t *testing.T) {
 }
 
 func TestEvictionControllerOptions_AddFlags_NilReceiver(t *testing.T) {
-	var config *GracefulEvictionOptions
+	var config *evictionqueue_config.EvictionQueueOptions
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 
 	config.AddFlags(fs)
