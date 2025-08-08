@@ -37,7 +37,7 @@ const (
 	clusterCPUAllocatedMetricsName       = "cluster_cpu_allocated_number"
 	clusterPodAllocatedMetricsName       = "cluster_pod_allocated_number"
 	clusterSyncStatusDurationMetricsName = "cluster_sync_status_duration_seconds"
-	evictionQueueDepthMetricsName        = "eviction_queue_depth"
+	evictionTotalMetricsName             = "eviction_total"
 	evictionKindTotalMetricsName         = "evict_kind_total"
 	evictionProcessingLatencyMetricsName = "eviction_processing_latency_seconds"
 	evictionProcessingTotalMetricsName   = "eviction_processing_total"
@@ -107,7 +107,7 @@ var (
 	}, []string{"cluster_name"})
 
 	evictionQueueMetrics = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: evictionQueueDepthMetricsName,
+		Name: evictionTotalMetricsName,
 		Help: "Current depth of the eviction queue",
 	}, []string{"name"})
 
