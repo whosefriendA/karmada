@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -55,17 +56,19 @@ func (f *fakeGenericLister) Get(_ string) (runtime.Object, error)              {
 func (f *fakeGenericLister) ByNamespace(_ string) cache.GenericNamespaceLister { return nil }
 
 func makeCluster(name string, ready bool) *clusterv1alpha1.Cluster {
-	condStatus := metav1.ConditionFalse
-	if ready {
-		condStatus = metav1.ConditionTrue
+	// In the new logic, a cluster is considered unhealthy if it has NoExecute taints.
+	// So for ready=false, we attach a NoExecute taint on the Cluster.Spec.Taints.
+	var taints []corev1.Taint
+	if !ready {
+		taints = []corev1.Taint{{
+			Key:    "test/noexecute",
+			Effect: corev1.TaintEffectNoExecute,
+		}}
 	}
 	return &clusterv1alpha1.Cluster{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Status: clusterv1alpha1.ClusterStatus{
-			Conditions: []metav1.Condition{{
-				Type:   clusterv1alpha1.ClusterConditionReady,
-				Status: condStatus,
-			}},
+		Spec: clusterv1alpha1.ClusterSpec{
+			Taints: taints,
 		},
 	}
 }
@@ -252,5 +255,113 @@ func TestGracefulEvictionRateLimiter_ExponentialBackoff(t *testing.T) {
 			t.Errorf("Attempt %d: Observed delay %v is significantly less than the effective expected delay %v", i+1, observedDelay, expectedFinalDelay)
 		}
 		lastObservedDelay = observedDelay
+	}
+}
+
+// Directly test the core computation in getCurrentRate for boundary conditions
+func TestDynamicRateLimiter_getCurrentRate_Boundaries(t *testing.T) {
+	clusterGVR := clusterv1alpha1.SchemeGroupVersion.WithResource("clusters")
+
+	makeObjs := func(healthy, unhealthy int) []runtime.Object {
+		var out []runtime.Object
+		for i := 0; i < healthy; i++ {
+			out = append(out, makeCluster("h"+string(rune('a'+i)), true))
+		}
+		for i := 0; i < unhealthy; i++ {
+			out = append(out, makeCluster("u"+string(rune('a'+i)), false))
+		}
+		return out
+	}
+
+	approx := func(a, b float32) bool {
+		d := a - b
+		if d < 0 {
+			d = -d
+		}
+		return d < 1e-6
+	}
+
+	{
+		opts := EvictionQueueOptions{ResourceEvictionRate: 10, SecondaryResourceEvictionRate: 1, UnhealthyClusterThreshold: 0.3, LargeClusterNumThreshold: 10}
+		objs := makeObjs(7, 3) // 3/10 = 0.3
+		mgr := gmtesting.NewFakeSingleClusterManager(true, true, func(gvr schema.GroupVersionResource) cache.GenericLister {
+			if gvr != clusterGVR {
+				return nil
+			}
+			return &fakeGenericLister{objects: objs, err: nil}
+		})
+		lim := &DynamicRateLimiter[any]{
+			resourceEvictionRate:          opts.ResourceEvictionRate,
+			secondaryResourceEvictionRate: opts.SecondaryResourceEvictionRate,
+			unhealthyClusterThreshold:     opts.UnhealthyClusterThreshold,
+			largeClusterNumThreshold:      opts.LargeClusterNumThreshold,
+			informerManager:               mgr,
+		}
+		rate := lim.getCurrentRate()
+		if !approx(rate, opts.ResourceEvictionRate) {
+			t.Fatalf("equal-threshold: got rate=%v, want %v", rate, opts.ResourceEvictionRate)
+		}
+	}
+
+	{
+		opts := EvictionQueueOptions{ResourceEvictionRate: 20, SecondaryResourceEvictionRate: 2, UnhealthyClusterThreshold: 0.3, LargeClusterNumThreshold: 10}
+		objs := makeObjs(7, 4) // 4/11 ≈ 0.364 > 0.3, total=11 > 10
+		mgr := gmtesting.NewFakeSingleClusterManager(true, true, func(gvr schema.GroupVersionResource) cache.GenericLister {
+			if gvr != clusterGVR {
+				return nil
+			}
+			return &fakeGenericLister{objects: objs, err: nil}
+		})
+		lim := &DynamicRateLimiter[any]{
+			resourceEvictionRate:          opts.ResourceEvictionRate,
+			secondaryResourceEvictionRate: opts.SecondaryResourceEvictionRate,
+			unhealthyClusterThreshold:     opts.UnhealthyClusterThreshold,
+			largeClusterNumThreshold:      opts.LargeClusterNumThreshold,
+			informerManager:               mgr,
+		}
+		rate := lim.getCurrentRate()
+		if !approx(rate, opts.SecondaryResourceEvictionRate) {
+			t.Fatalf("large-scale over-threshold: got rate=%v, want %v", rate, opts.SecondaryResourceEvictionRate)
+		}
+	}
+
+	{
+		opts := EvictionQueueOptions{ResourceEvictionRate: 15, SecondaryResourceEvictionRate: 1.5, UnhealthyClusterThreshold: 0.3, LargeClusterNumThreshold: 10}
+		objs := makeObjs(6, 4) // 4/10 = 0.4 > 0.3, total=10 => small-scale
+		mgr := gmtesting.NewFakeSingleClusterManager(true, true, func(gvr schema.GroupVersionResource) cache.GenericLister {
+			if gvr != clusterGVR {
+				return nil
+			}
+			return &fakeGenericLister{objects: objs, err: nil}
+		})
+		lim := &DynamicRateLimiter[any]{
+			resourceEvictionRate:          opts.ResourceEvictionRate,
+			secondaryResourceEvictionRate: opts.SecondaryResourceEvictionRate,
+			unhealthyClusterThreshold:     opts.UnhealthyClusterThreshold,
+			largeClusterNumThreshold:      opts.LargeClusterNumThreshold,
+			informerManager:               mgr,
+		}
+		rate := lim.getCurrentRate()
+		if !approx(rate, 0) {
+			t.Fatalf("small-scale over-threshold: got rate=%v, want 0", rate)
+		}
+	}
+
+	{
+		opts := EvictionQueueOptions{ResourceEvictionRate: 50, SecondaryResourceEvictionRate: 5, UnhealthyClusterThreshold: 0.3, LargeClusterNumThreshold: 10}
+		mgr := gmtesting.NewFakeSingleClusterManager(true, true, func(gvr schema.GroupVersionResource) cache.GenericLister {
+			return nil
+		})
+		lim := &DynamicRateLimiter[any]{
+			resourceEvictionRate:          opts.ResourceEvictionRate,
+			secondaryResourceEvictionRate: opts.SecondaryResourceEvictionRate,
+			unhealthyClusterThreshold:     opts.UnhealthyClusterThreshold,
+			largeClusterNumThreshold:      opts.LargeClusterNumThreshold,
+			informerManager:               mgr,
+		}
+		rate := lim.getCurrentRate()
+		if !approx(rate, 0) {
+			t.Fatalf("nil-lister: got rate=%v, want 0", rate)
+		}
 	}
 }

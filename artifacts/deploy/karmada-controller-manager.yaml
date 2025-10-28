@@ -39,11 +39,15 @@ spec:
             - --cluster-status-update-frequency=10s
             - --controllers=*,hpaScaleTargetMarker,deploymentReplicasSyncer
             - --feature-gates=AllAlpha=true,AllBeta=true
-            - --metrics-bind-address=$(POD_IP):8080
-            - --health-probe-bind-address=$(POD_IP):10357
+            - --metrics-bind-address=0.0.0.0:8080
+            - --health-probe-bind-address=0.0.0.0:10357
             - --enable-no-execute-taint-eviction=true
             - --logging-format=json
             - --v=4
+            - --resource-eviction-rate=5
+            - --secondary-resource-eviction-rate=1
+            - --unhealthy-cluster-threshold=0
+            - --large-cluster-num-threshold=10
           livenessProbe:
             httpGet:
               path: /healthz

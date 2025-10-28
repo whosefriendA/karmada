@@ -27,8 +27,8 @@ import (
 	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
 	"github.com/karmada-io/karmada/pkg/metrics"
 	"github.com/karmada-io/karmada/pkg/sharedcli/ratelimiterflag"
-	"github.com/karmada-io/karmada/pkg/util"
 	"github.com/karmada-io/karmada/pkg/util/fedinformer/genericmanager"
+	helper "github.com/karmada-io/karmada/pkg/util/helper"
 )
 
 // maxEvictionDelay is the maximum delay for eviction when the rate is 0
@@ -91,7 +91,7 @@ func (d *DynamicRateLimiter[T]) getCurrentRate() float32 {
 
 	totalClusters := len(clusters)
 	if totalClusters == 0 {
-		return d.resourceEvictionRate
+		return 0
 	}
 
 	unhealthyClusters := 0
@@ -100,7 +100,8 @@ func (d *DynamicRateLimiter[T]) getCurrentRate() float32 {
 		if !ok {
 			continue
 		}
-		if !util.IsClusterReady(&cluster.Status) {
+		// Consider a cluster unhealthy if it has any NoExecute taints.
+		if helper.HasNoExecuteTaints(cluster.Spec.Taints) {
 			unhealthyClusters++
 		}
 	}
